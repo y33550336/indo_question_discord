@@ -1,0 +1,13 @@
+[
+  {
+    "type": "vocab",
+    "question": "「makan」の意味は？",
+    "choices": ["行く", "食べる", "見る"],
+    "answer": "食べる"
+  },
+  {
+    "type": "grammar",
+    "question": "Saya ___ nasi.",
+    "answer": "makan"
+  }
+]
