@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
@@ -102,6 +103,53 @@ func Normalize(s string) string {
 
 func Check(user, answer string) bool {
 	return Normalize(user) == Normalize(answer)
+}
+
+func postCVQuestion(s *discordgo.Session, channelID string) {
+	// 前の問題が未解決なら答えを表示
+	if currentCVItem != nil {
+		s.ChannelMessageSend(channelID, "前の問題が未解決でした。正解は: "+currentCVItem.Sentence)
+	}
+
+	var selectedItems []CVItem
+	for _, items := range cvItemsMap {
+		selectedItems = append(selectedItems, items...)
+	}
+
+	if len(selectedItems) == 0 {
+		s.ChannelMessageSend(channelID, "No CV items loaded")
+		return
+	}
+
+	item := selectedItems[rand.Intn(len(selectedItems))]
+	currentCVItem = &item
+
+	file, err := os.Open(item.AudioPath)
+	if err != nil {
+		s.ChannelMessageSend(channelID, "Error opening audio file")
+		return
+	}
+	defer file.Close()
+
+	s.ChannelFileSend(channelID, "listening.mp3", file)
+	s.ChannelMessageSend(channelID, "🎯 本日の問題です！音声を聞いて文章を入力してください！")
+}
+
+func startDailyQuestion(s *discordgo.Session, channelID string) {
+	for {
+		now := time.Now()
+		// 毎日9時に出題（JSTを想定）
+		next := time.Date(now.Year(), now.Month(), now.Day(), 22, 41, 0, 0, now.Location())
+		if now.After(next) {
+			next = next.Add(24 * time.Hour)
+		}
+
+		duration := next.Sub(now)
+		log.Printf("Next auto question in %v (at %v)", duration, next)
+
+		time.Sleep(duration)
+		postCVQuestion(s, channelID)
+	}
 }
 
 func getMatchedWords(user, answer string) []string {
@@ -302,6 +350,13 @@ func main() {
 	}
 
 	log.Println("Bot is running")
+
+	// 自動出題を開始
+	autoChannelID := os.Getenv("AUTO_QUESTION_CHANNEL_ID")
+	if autoChannelID != "" {
+		go startDailyQuestion(dg, autoChannelID)
+		log.Println("Auto daily question enabled for channel:", autoChannelID)
+	}
 
 	// 終了待ち
 	stop := make(chan os.Signal, 1)
