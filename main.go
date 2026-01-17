@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/csv"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
@@ -17,32 +16,16 @@ import (
 	"github.com/joho/godotenv"
 )
 
-type Question struct {
-	Type     string   `json:"type"`
-	Question string   `json:"question"`
-	Choices  []string `json:"choices,omitempty"`
-	Answer   string   `json:"answer,omitempty"`
-}
-
 type CVItem struct {
 	AudioPath string
 	Sentence  string
 	Level     string
 }
 
-var questions []Question
 var cvItemsMap map[string][]CVItem
 var currentCVItem *CVItem
 var hintLevels map[string]int
 var mistakeCounts map[string]int
-
-func loadQuestions() {
-	data, err := os.ReadFile("questions.json")
-	if err != nil {
-		log.Fatal(err)
-	}
-	json.Unmarshal(data, &questions)
-}
 
 func LoadCommonVoice(tsvPath string) ([]CVItem, error) {
 	file, err := os.Open(tsvPath)
@@ -122,6 +105,53 @@ func Check(user, answer string) bool {
 	return Normalize(user) == Normalize(answer)
 }
 
+func postCVQuestion(s *discordgo.Session, channelID string) {
+	// 前の問題が未解決なら答えを表示
+	if currentCVItem != nil {
+		s.ChannelMessageSend(channelID, "前の問題が未解決でした。正解は: "+currentCVItem.Sentence)
+	}
+
+	var selectedItems []CVItem
+	for _, items := range cvItemsMap {
+		selectedItems = append(selectedItems, items...)
+	}
+
+	if len(selectedItems) == 0 {
+		s.ChannelMessageSend(channelID, "No CV items loaded")
+		return
+	}
+
+	item := selectedItems[rand.Intn(len(selectedItems))]
+	currentCVItem = &item
+
+	file, err := os.Open(item.AudioPath)
+	if err != nil {
+		s.ChannelMessageSend(channelID, "Error opening audio file")
+		return
+	}
+	defer file.Close()
+
+	s.ChannelFileSend(channelID, "listening.mp3", file)
+	s.ChannelMessageSend(channelID, "🎯 本日の問題です！音声を聞いて文章を入力してください！")
+}
+
+func startDailyQuestion(s *discordgo.Session, channelID string) {
+	for {
+		now := time.Now()
+		// 毎日9時に出題（JSTを想定）
+		next := time.Date(now.Year(), now.Month(), now.Day(), 22, 41, 0, 0, now.Location())
+		if now.After(next) {
+			next = next.Add(24 * time.Hour)
+		}
+
+		duration := next.Sub(now)
+		log.Printf("Next auto question in %v (at %v)", duration, next)
+
+		time.Sleep(duration)
+		postCVQuestion(s, channelID)
+	}
+}
+
 func getMatchedWords(user, answer string) []string {
 	u := Normalize(user)
 	a := Normalize(answer)
@@ -161,8 +191,6 @@ func main() {
 	dg.Identify.Intents = discordgo.IntentsGuildMessages |
 		discordgo.IntentsMessageContent
 
-	rand.Seed(time.Now().UnixNano())
-	loadQuestions()
 	loadCVItems()
 	hintLevels = make(map[string]int)
 	mistakeCounts = make(map[string]int)
@@ -215,7 +243,8 @@ func main() {
 			userInput := m.Content
 			userID := m.Author.ID
 			if Check(userInput, currentCVItem.Sentence) {
-				s.ChannelMessageSend(m.ChannelID, "Correct! 🎉")
+				response := "Correct! 🎉"
+				s.ChannelMessageSend(m.ChannelID, response)
 				mistakeCounts[userID] = 0
 				currentCVItem = nil
 				return
@@ -226,7 +255,7 @@ func main() {
 			if len(matched) > 0 {
 				msg := "部分一致した単語: " + strings.Join(matched, ", ") + "\n"
 				if mistakeCounts[userID] >= 3 {
-					msg += "回答: " + currentCVItem.Sentence
+					msg += "不正解。正解は: " + currentCVItem.Sentence + "\n"
 					s.ChannelMessageSend(m.ChannelID, msg)
 					mistakeCounts[userID] = 0
 					currentCVItem = nil
@@ -237,7 +266,7 @@ func main() {
 				s.ChannelMessageSend(m.ChannelID, msg)
 			} else {
 				if mistakeCounts[userID] >= 3 {
-					s.ChannelMessageSend(m.ChannelID, "不正解。正解は: "+currentCVItem.Sentence)
+					s.ChannelMessageSend(m.ChannelID, "不正解。正解は: "+currentCVItem.Sentence+"\n")
 					mistakeCounts[userID] = 0
 					currentCVItem = nil
 					return
@@ -253,7 +282,8 @@ func main() {
 				return
 			}
 			userID := m.Author.ID
-			s.ChannelMessageSend(m.ChannelID, "回答: "+currentCVItem.Sentence)
+			response := "回答: " + currentCVItem.Sentence
+			s.ChannelMessageSend(m.ChannelID, response)
 			mistakeCounts[userID] = 0
 			hintLevels[userID] = 0
 			currentCVItem = nil
@@ -312,21 +342,6 @@ func main() {
 			s.ChannelMessageSend(m.ChannelID, hint)
 			hintLevels[userID]++
 		}
-
-		if m.Content == "!today" {
-			q := questions[rand.Intn(len(questions))]
-
-			msg := "📘 今日の一問\n" + q.Question
-
-			if q.Type == "vocab" && len(q.Choices) > 0 {
-				for i, c := range q.Choices {
-					msg += "\n" + string('A'+i) + ". " + c
-				}
-			}
-
-			s.ChannelMessageSend(m.ChannelID, msg)
-		}
-
 	})
 
 	err = dg.Open()
@@ -335,6 +350,13 @@ func main() {
 	}
 
 	log.Println("Bot is running")
+
+	// 自動出題を開始
+	autoChannelID := os.Getenv("AUTO_QUESTION_CHANNEL_ID")
+	if autoChannelID != "" {
+		go startDailyQuestion(dg, autoChannelID)
+		log.Println("Auto daily question enabled for channel:", autoChannelID)
+	}
 
 	// 終了待ち
 	stop := make(chan os.Signal, 1)
